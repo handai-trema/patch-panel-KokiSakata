@@ -16,7 +16,142 @@
 
 ## 解答
 
-### 課題1
+### 課題1（ポートのミラーリング）
+#### コード解説
+lib/patch_panel.rbをベースにlib/patch_panel_task.rbを作成した。その変更点を説明する。
+まず初めにcreate_mirrorringというメソッドを追加した。そのコードを以下に示す。
+```ruby
+  def create_mirrorring(dpid, observer, target)
+    add_mirroring dpid, observer, target
+    @mirror[dpid] << [observer, target]
+  end
+```
+スイッチのデータパスID、ミラーリングを行うポート、ミラーリング対象となるポートを引数としている。それらの引数を用いてadd_mirroringというメソッドを呼び出す（後で説明）。その後mirrorというハッシュテーブルにミラーリングの情報を保存する（課題２のため）。
+続いて、add_mirroringメソッドについて説明する。そのコードを以下に示す。
+```ruby
+  def add_mirroring(dpid, observer, target)
+    @patch[dpid].each do |port_a, port_b|
+      port_tmp = nil
+      port_tmp = port_b if port_a == target
+      port_tmp = port_a if port_b == target
+      if port_tmp != nil then
+        send_flow_mod_delete(dpid, match: Match.new(in_port: target))
+        send_flow_mod_delete(dpid, match: Match.new(in_port: port_tmp))
+        send_flow_mod_add(dpid,
+                      match: Match.new(in_port: target),
+                      actions:[ 
+                        SendOutPort.new(port_tmp),
+                        SendOutPort.new(observer)
+                    ])
+        send_flow_mod_add(dpid,
+                      match: Match.new(in_port: port_tmp),
+                      actions:[ 
+                        SendOutPort.new(target),
+                        SendOutPort.new(observer)
+                    ])
+      end
+    end
+  end
+```
+スイッチのデータパスID、ミラーリングを行うポート、ミラーリング対象となるポートを引数としている。パッチ状態を保存しているハッシュテーブルの各要素に対して操作を行う。
+パッチのどちらかのポートがミラーリング対象であれば、もう片方をTEMPとする。そして。以下の２つの操作を行う。
+* ミラーリング対象からTEMPに送られるパケットをミラーリングを行うポートにも送る（元のフローエントリを消して，新しく追加するときのアクションでの送り先にミラーリングを行うポートを追加）
+* TEMPからミラーリング対象に送られるパケットをミラーリングを行うポートにも送る（元のフローエントリを消して，新しく追加するときのアクションでの送り先にミラーリングを行うポートを追加）
+このようにしてポートのミラーリングが実現される。
+
+次に、実行ファイルであるbin/patch_panel_taskをbin/patch_panelをベースにして作成した。その変更点を説明する。以下にソースコードを示す。
+```ruby
+  desc 'Create a mirroring'
+  arg_name 'dpid observer target'
+  command :mirroring do |c|
+    c.desc 'Location to find socket files'
+    c.flag [:S, :socket_dir], default_value: Trema::DEFAULT_SOCKET_DIR
+
+    c.action do |_global_options, options, args|
+      dpid = args[0].hex
+      observer = args[1].to_i
+      target = args[2].to_i
+      Trema.trema_process('PatchPanel', options[:socket_dir]).controller.
+        create_mirrorring(dpid, observer, target)
+    end
+  end
+```
+これはデフォルトで定義されている'Creates a new patch'と'Deletes a patch'をベースにして作成した。
+
+最後にpatch_panel.congの変更を行った。そのソースコードを以下に示す。
+```ruby
+vswitch('patch_panel') { datapath_id 0xabc }
+
+vhost ('host1') { ip '192.168.0.1' }
+vhost ('host2') { ip '192.168.0.2' }
+vhost ('host3') { ip '192.168.0.3' 
+promisc true
+}
+
+link 'patch_panel', 'host1'
+link 'patch_panel', 'host2'
+link 'patch_panel', 'host3'
+```
+host3の設定のところにpromisc trueを追加することにより、自分宛てでないパケットも読み込めるように設定している。
+
+#### 動作確認
+以下の順でコマンドを実行する。
+```
+```
+その実行結果が以下である。
+```
+```
+以上より、host3がhost1をミラーリングして、host1のパケットの出入りを読み取ることができていることが確認された。
 
 
-### 課題2
+### 課題2（パッチとポートミラーリングの一覧）
+#### コード解説
+lib/patch_panel.rbをベースにlib/patch_panel_task.rbを作成した。その変更点を説明する。
+show_list_patch_mirroringというメソッドを追加した。そのソースコードを以下に示す。
+```ruby
+  def show_list_patch_mirroring(dpid)
+    tmp = Array.new()
+    tmp << @patch
+    tmp << @mirror
+    return tmp
+  end
+```
+スイッチのデータパスを引数として、そのスイッチのパッチとミラーリングテーブルを１つの配列に入れて返している。
+
+次に、実行ファイルであるbin/patch_panel_taskをbin/patch_panelをベースにして作成した。その変更点を説明する。以下にソースコードを示す。
+```ruby
+  desc 'Show list patch and mirroring'
+  arg_name 'dpid'
+  command :list do |c|
+    c.desc 'Location to find socket files'
+    c.flag [:S, :socket_dir], default_value: Trema::DEFAULT_SOCKET_DIR
+
+    c.action do |_global_options, options, args|
+      dpid = args[0].hex
+      list_temp=Trema.trema_process('PatchPanel', options[:socket_dir]).controller.
+        show_list_patch_mirroring(dpid)
+      @patch = list_temp[0]
+      @mirror = list_temp[1]
+      
+      print("patch list:\n")
+      @patch[dpid].each do |port_a, port_b|
+        print("port", port_a, " <---> port", port_b, "\n")
+        end
+      print("mirror list:\n")
+      @mirror[dpid].each do |observe, target|
+        print("port", observe, " --> port", target, "\n")
+        end
+    end
+  end
+```
+これはデフォルトで定義されている'Creates a new patch'と'Deletes a patch'をベースにして作成した。show_list_patch_mirroringの返り値の配列の要素を用いてパッチ、ミラーリングの順で出力する。
+
+#### 動作確認
+以下の順でコマンドを実行する。
+```
+```
+その実行結果が以下である。
+```
+```
+以上より、スイッチ0xabcにおけるパッチとミラーリングの一覧が正しく表示されていることが確認された。
+
